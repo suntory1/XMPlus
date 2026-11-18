@@ -248,6 +248,7 @@ class XmlyClient {
     return method == 'GET' &&
         (const [
               '/mobile/v1/album/info',
+              '/mobile/playlist/album/page',
               '/mobile-album/album/plant/detail',
               '/lite-mobile/like/v1/user-likes',
             ].contains(path) ||
@@ -1211,23 +1212,36 @@ class XmlyClient {
     Map<String, dynamic> response;
     var authenticated = accountAvailable;
     try {
-      response = await request(
-        'GET',
-        mobile,
-        path,
-        query: query,
-        account: authenticated,
-      );
+      try {
+        response = await request(
+          'GET',
+          mobile,
+          path,
+          query: query,
+          account: authenticated,
+        );
+      } on XmlyException catch (error) {
+        // Expiry still allows public listening; permission/risk failures do not.
+        if (error.code != 'login_expired') rethrow;
+        authenticated = false;
+        response = await request(
+          'GET',
+          mobile,
+          path,
+          query: query,
+          account: false,
+        );
+      }
     } on XmlyException catch (error) {
-      // Expiry still allows public listening; permission/risk failures do not.
-      if (error.code != 'login_expired') rethrow;
-      authenticated = false;
-      response = await request(
-        'GET',
-        mobile,
-        path,
-        query: query,
-        account: false,
+      // The legacy catalogue can report 924 for albums still available through
+      // the official playlist service. Keep playback authorization unchanged.
+      if (error.code != 'content_removed') rethrow;
+      return _playlistAlbumPage(
+        number,
+        page: page,
+        pageSize: pageSize,
+        ascending: ascending,
+        authenticated: authenticated,
       );
     }
     return _readAlbumPage(
@@ -1237,6 +1251,104 @@ class XmlyClient {
       pageSize: pageSize,
       ascending: ascending,
       query: query,
+      authenticated: authenticated,
+    );
+  }
+
+  Future<AlbumPage> _playlistAlbumPage(
+    String number, {
+    required int page,
+    required int pageSize,
+    required bool ascending,
+    required bool authenticated,
+  }) async {
+    AppLog.instance.trace(
+      'lib/api/xmly_client.dart::XmlyClient._playlistAlbumPage',
+    );
+    const path = '/mobile/playlist/album/page';
+    final firstResponse = await request(
+      'GET',
+      mobile,
+      path,
+      query: {'albumId': number, 'pageId': 1, 'device': 'android'},
+      account: authenticated,
+    );
+    // This route chooses its own page size and follows the album's default
+    // order. Adapt complete source spans to the caller's absolute ASC/DESC page.
+    final sourceSize = _total(firstResponse['pageSize']);
+    if (sourceSize < 1 || sourceSize > xmlyAlbumPageSize)
+      throw const XmlyException('invalid_catalogue', '专辑分页无效');
+    final firstData = _albumPageData(
+      {'data': firstResponse}, number, 1, sourceSize,
+    );
+    final total = _total(firstData['totalCount']);
+    final firstRows = firstData['list'] as List;
+    if (firstRows.length != min(sourceSize, total))
+      throw const XmlyException('invalid_catalogue', '专辑目录不完整，请稍后重试');
+    var descending = false;
+    if (firstRows.isNotEmpty) {
+      final position = xmlyPositive(xmlyMap(firstRows.first)['orderNo']);
+      if (position != 1 && position != total)
+        throw const XmlyException('invalid_catalogue', '专辑声音顺序无效');
+      descending = total > 1 && position == total;
+    }
+    final reverse = ascending == descending;
+    final first = (page - 1) * pageSize + 1;
+    final last = min(page * pageSize, total);
+    final sourceFirst = reverse ? total - last + 1 : first;
+    final sourceLast = reverse ? total - first + 1 : last;
+    final rows = <Map<String, dynamic>>[];
+    if (first <= last) {
+      for (var sourcePage = (sourceFirst - 1) ~/ sourceSize + 1;
+          sourcePage <= (sourceLast - 1) ~/ sourceSize + 1;
+          sourcePage++) {
+        final data = sourcePage == 1
+            ? firstData
+            : _albumPageData(
+                {'data': await request(
+                  'GET', mobile, path,
+                  query: {
+                    'albumId': number,
+                    'pageId': sourcePage,
+                    'device': 'android',
+                  },
+                  account: authenticated,
+                )},
+                number, sourcePage, sourceSize,
+              );
+        if (_total(data['totalCount']) != total)
+          throw const XmlyException('catalogue_changed', '专辑总数已变化，请刷新重试');
+        final values = data['list'] as List;
+        final offset = (sourcePage - 1) * sourceSize;
+        if (values.length != min(sourceSize, total - offset))
+          throw const XmlyException('invalid_catalogue', '专辑目录不完整，请稍后重试');
+        for (var index = 0; index < values.length; index++) {
+          final row = xmlyMap(values[index]);
+          final slot = offset + index + 1;
+          final position = descending ? total - slot + 1 : slot;
+          if (xmlyPositive(row['orderNo']) != position)
+            throw const XmlyException('catalogue_changed', '专辑声音顺序已变化，请刷新重试');
+          if (slot >= sourceFirst && slot <= sourceLast) rows.add(row);
+        }
+      }
+    }
+    if (rows.length != max(0, last - first + 1))
+      throw const XmlyException('invalid_catalogue', '专辑目录不完整，请稍后重试');
+    // Normalize only directory metadata. _readAlbumPage retains the usual ID,
+    // duplicate, cache and queue checks; audio is resolved by the existing flow.
+    return _readAlbumPage(
+      {'data': {
+        'pageId': page,
+        'pageSize': pageSize,
+        'totalCount': total,
+        'maxPageId': (total + pageSize - 1) ~/ pageSize,
+        'list': reverse ? rows.reversed.toList() : rows,
+      }},
+      number,
+      page: page,
+      pageSize: pageSize,
+      ascending: ascending,
+      query: const {},
       authenticated: authenticated,
     );
   }

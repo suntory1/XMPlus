@@ -32,6 +32,7 @@ android {
 
     defaultConfig {
         applicationId = "teikengstudio.xmplus"
+        manifestPlaceholders["appLabel"] = "XMPlus"
         minSdk = 26
         targetSdk = 36
         versionCode = flutter.versionCode
@@ -57,6 +58,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            if (System.getenv("XMPLUS_CATALOGUE_TEST") == "true") {
+                applicationIdSuffix = ".cataloguefix"
+                versionNameSuffix = "-catalogue-test"
+                manifestPlaceholders["appLabel"] = "XMPlus 目录测试"
+            }
+        }
         release {
             signingConfig = signingConfigs.findByName("release")
             proguardFiles(

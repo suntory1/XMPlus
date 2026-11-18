@@ -44,6 +44,8 @@ jobs:
           cache: true
       - name: Resolve locked dependencies
         run: flutter pub get --enforce-lockfile
+      - name: Analyze catalogue client
+        run: flutter analyze --no-pub lib/api/xmly_client.dart
       - name: Check method trace coverage
         run: dart --disable-dart-dev --packages=.dart_tool/package_config.json tool/check_method_trace.dart
       - name: Restore source-built native media executables
@@ -52,8 +54,18 @@ jobs:
           pattern: android-tools-*
           path: android/app/src/main/jniLibs/
           merge-multiple: true
-      - name: Compile Android (debug validation only, never published)
+      - name: Compile Android debug validation
+        env:
+          XMPLUS_CATALOGUE_TEST: ${{ github.repository != 'teikengstudio/XMPlus' }}
         run: flutter build apk --debug --target-platform android-arm64 --no-pub
+      - name: Upload installable fork test APK
+        if: github.repository != 'teikengstudio/XMPlus'
+        uses: actions/upload-artifact@v6
+        with:
+          name: XMPlus-catalogue-test-arm64
+          path: build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
 
   signed:
     needs: native-tools
